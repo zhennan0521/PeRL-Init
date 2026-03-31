@@ -1,3 +1,6 @@
 [submodule "modules/AReaL"]
 	path = modules/AReaL
 	url = https://github.com/zhennan0521/AReaL.git
+[submodule "modules/PeRL"]
+	path = modules/PeRL
+	url = https://github.com/MikaStars39/PeRL.git
