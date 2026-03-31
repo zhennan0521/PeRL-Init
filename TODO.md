@@ -27,6 +27,6 @@
 ## Progress
 
 - [x] 代码管理：fork AReaL，merge PR #1015 到 `lora_init` 分支，main 保持与上游同步
-- [ ] Step 1: 跑通 base & LoRA example
+- [ ] Step 1: 跑通 base & LoRA example (异步和非异步)
 - [ ] Step 2: 移植 PEFT 方法到 AReaL
 - [ ] Step 3: 实现 MiLoRA++
