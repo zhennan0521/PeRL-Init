@@ -9,7 +9,7 @@ tokenizer_path: ${actor.path}
 cluster:
   n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /jpfs/shenzhennan.1/PeRL-Init/outputs
+  fileroot: /jpfs-5p/shenzhennan/PeRL-Init/outputs
   name_resolve:
     type: nfs
     nfs_record_root: ${cluster.fileroot}/name_resolve
@@ -94,7 +94,7 @@ actor:
       mem: 32
       cmd: python3 -m areal.infra.rpc.rpc_server
       env_vars:
-        PYTHONPATH: /jpfs/shenzhennan.1/PeRL-Init/modules/AReaL
+        PYTHONPATH: /jpfs-5p/shenzhennan/PeRL-Init/modules/AReaL
 
 ref:
   experiment_name: ${experiment_name}
