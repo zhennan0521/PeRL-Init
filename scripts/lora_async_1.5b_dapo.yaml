@@ -43,7 +43,7 @@ gconfig:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  backend: archon:d2t2
+  backend: archon:d4
   path: /jpfs/shenzhennan.1/models/DeepSeek-R1-Distill-Qwen-1.5B
   init_from_scratch: false
   disable_dropout: true

@@ -14,8 +14,8 @@ LOG_DIR="${PROJECT_DIR}/outputs/logs"
 mkdir -p "$LOG_DIR"
 
 python3 "${SCRIPT_DIR}/run_rl.py" \
-    --config "${SCRIPT_DIR}/lora_1.5b_dapo.yaml" \
-    experiment_name=lora-1.5b-dapo \
+    --config "${SCRIPT_DIR}/lora_async_1.5b_dapo.yaml" \
+    experiment_name=lora-1.5b-dapo-async \
     trial_name=${TIMESTAMP} \
     +actor.archon.enable_compile=false \
     "$@" 2>&1 | tee "${LOG_DIR}/lora_1.5b_dapo_${TIMESTAMP}.log"
