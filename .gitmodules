@@ -1,0 +1,3 @@
+[submodule "modules/AReaL"]
+	path = modules/AReaL
+	url = https://github.com/zhennan0521/AReaL.git
