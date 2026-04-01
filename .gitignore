@@ -35,3 +35,6 @@ Thumbs.db
 # Secrets
 .env
 *.key
+
+
+ray_start.sh
