@@ -32,6 +32,8 @@
     - 结论：async (offpolicy=2) 优于 sync，full 和 LoRA 均如此
   - [x] Step 1.2: LoRA sync lr sweep (5e-5, 1e-5, 5e-6, 1e-6)
     - 暂定：lr=5e-5 优于 lr=2e-5
-  - [ ] Step 1.3: 多机 run LoRA async lr=5e-5 实验
+  - [x] Step 1.3: 单机 run LoRA async lr=5e-5 实验
+  - [ ] Step 1。4: 摸清现在lora修改逻辑，看看实现有无bug，以及确认后续peft接口
+
 - [ ] Step 2: 移植 PEFT 方法到 AReaL
 - [ ] Step 3: 实现 MiLoRA++

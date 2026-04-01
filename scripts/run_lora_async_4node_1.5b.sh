@@ -6,8 +6,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 export PYTHONPATH="${PROJECT_DIR}/modules/AReaL"
 export NCCL_ASYNC_ERROR_HANDLING=1
-export TORCH_NCCL_BLOCKING_WAIT=0
-export NCCL_DEBUG=WARN
+export TORCH_NCCL_BLOCKING_WAIT=1
+export NCCL_DEBUG=INFO
+export NCCL_TIMEOUT=300000
 
 TIMESTAMP=$(date +%Y%m%d%H%M)
 LOG_DIR="${PROJECT_DIR}/outputs/logs"
@@ -29,11 +30,12 @@ mkdir -p "$LOG_DIR"
 #   4. Run this script on the head node.
 # ============================================================
 
-python3 -m areal.infra.launcher.ray \
+python3 "${SCRIPT_DIR}/run_rl.py" \
     --config "${SCRIPT_DIR}/lora_async_4node_1.5b_dapo.yaml" \
     experiment_name=lora-1.5b-dapo-async-4node-lr5e-5 \
     trial_name=${TIMESTAMP} \
-    +allocation_mode=sglang:d24p1t1+archon:d8p1t1 \
+    +scheduler.type=ray \
     cluster.n_nodes=4 \
     cluster.n_gpus_per_node=8 \
+    +actor.archon.enable_compile=false \
     "$@" 2>&1 | tee "${LOG_DIR}/lora_async_4node_1.5b_${TIMESTAMP}.log"
