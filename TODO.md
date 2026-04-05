@@ -75,6 +75,9 @@
     - [x] Step 1.4.2: 多机bug修复 （cluster nfs_record_root: ${cluster.fileroot}/name_resolve）
     - [x] Step 1.4.3: LoRA 逻辑实现排查（plain tensor设计、checkpoint save/load、weight update 全链路 review）
       - 结论：6 个已知 bug 确认，无新 bug。详见 tutorial.md
+  - [ ] Step 1.5: 确认 baseline setting 🔄
+    - 评估中：sync vs async、lr 大小（5e-5 vs 2e-5）
+    - 4node sync 实验已配置，待跑
 - [ ] Step 2: 移植 PEFT 方法到 AReaL
   - [ ] Step 2.1: 迁移各类 PEFT 方法（从 PeRL 借鉴）
     - [ ] rsLoRA（改 scaling 一行）
