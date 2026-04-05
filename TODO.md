@@ -87,7 +87,8 @@
     - [ ] DoRA（magnitude + direction 分解，改 forward）
     - [ ] SliceFine（切片 weight，自定义 layer）
     - [ ] LoRA+（A/B 不同学习率，改 optimizer）
-    - [ ] LoRA-FA（冻结 A 只训 B，改 optimizer）
+    - [x] LoRA-FA（冻结 A 只训 B，改 optimizer）
+    - [x] LoRA+（A/B 不同学习率，改 optimizer）
     - [ ] AdaLoRA（动态 rank，侵入性强）
   - [ ] Step 2.2: 补充评测
 - [ ] Step 3: 实现 MiLoRA++

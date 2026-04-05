@@ -641,3 +641,52 @@ if peft_type == "lorafa":
 
 1. LoRA-FA 与 rsLoRA 可以组合使用（rsLoRA 改 scaling，LoRA-FA 改训练参数），但目前先独立实现
 2. A frozen 后优化器状态（momentum/variance）不会为 A 分配，自动节省内存
+
+## C.5 LoRA+ 迁移方案
+
+### 背景
+
+LoRA+ 出自论文 *LoRA+: Efficient Low Rank Adaptation of Large Models*。核心发现：B 矩阵应该用比 A 矩阵更大的学习率，论文推荐 `lr_B = lr_A × ratio`（默认 ratio=2.0）。
+
+### 算法
+
+1. 初始化与标准 LoRA 相同（kaiming A + zeros B）
+2. Forward 不变
+3. **Optimizer 使用两个 param groups**：A 用 base_lr，B 用 base_lr × `loraplus_lr_ratio`
+
+### PeRL 实现
+
+PeRL 调用 HuggingFace PEFT 的 `create_loraplus_optimizer` [adapter.py:136]，传入 `loraplus_lr_ratio=2.0`。
+
+### 迁移到 AReaL 的修改点
+
+AReaL 当前 optimizer 链路：`_get_all_parameters()` 返回 flat list → `create_optimizer(params, config)` 创建 AdamW。LoRA+ 需要将 A 和 B 拆成不同 param groups。
+
+#### 1. `cli_args.py` — 新增配置字段
+
+在 PPOActorConfig 加 `loraplus_lr_ratio: float = 1.0`。ratio=1.0 等价于标准 LoRA。
+
+#### 2. `archon_engine.py` — LoRAConfig 传入 ratio + _create_optimizer 分组
+
+LoRAConfig 加 `loraplus_lr_ratio` 字段。`_create_optimizer` 当 `peft_type == "lora_plus"` 时，构建两个 param groups：
+- Group 1: base params + lora_a → lr = base_lr
+- Group 2: lora_b → lr = base_lr × ratio
+
+通过遍历 LoRALinear modules 按 `_lora_a_weight` / `_lora_b_weight` 属性区分。
+
+#### 3. `archon_utils.py` — create_optimizer 支持 param groups
+
+修改签名 `params: list[nn.Parameter] | list[dict]`，当传入 param groups（list of dict）时直接传给 AdamW。
+
+#### 4. 新增启动脚本和 yaml
+
+- `scripts/lora_plus_async_4node_1.5b_dapo.yaml`：`peft_type: lora_plus`, `loraplus_lr_ratio: 2.0`
+- `scripts/run_lora_plus_async_4node_1.5b.sh`
+
+### 不需要改的
+
+- `forward()` — 不变
+- `sync_lora_grads()` — 不变（按 tensor.grad is not None 过滤）
+- checkpoint — 不变
+- `fsdp2_clip_grad_norm` — 用 `_get_all_parameters()` 的 flat list，和 optimizer groups 无关
+- `create_lr_scheduler` — 两个 group 共享同一 scheduler（constant），不影响
