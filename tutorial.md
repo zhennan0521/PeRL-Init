@@ -548,3 +548,42 @@ def _init_milora_plus(lora_linear: "LoRALinear"):
 2. **float32 精度**：SVD 必须在 float32 下做（bf16 精度不够），结果再转回 bf16
 3. **scaling**：MiLoRA++ 使用标准 LoRA scaling（α/r），不用 rsLoRA 的 α/√r
 4. **B=0 保证**：初始化时 LoRA 输出为零，训练开始时模型行为与原始模型一致
+
+## C.3 PiSSA & MiLoRA 迁移方案
+
+### 背景
+
+PiSSA 和 MiLoRA 都是 SVD-based 初始化方法，与 MiLoRA++ 不同的是它们**带上奇异值幅度**初始化 A/B，且**需要修改 base weight**。
+
+| 方法 | SVD 方向 | A/B 初始化 | Base Weight |
+|------|----------|-----------|-------------|
+| PiSSA | 最大奇异值（主成分） | A = √(S/scaling) · Vh, B = U · √(S/scaling) | W -= scaling · BA |
+| MiLoRA | 最小奇异值（次要成分） | 同上，但取最小 r 个 | W -= scaling · BA |
+| MiLoRA++ | 最小奇异值 | A = Vh（方向only），B = 0 | 不修改 |
+
+### 算法
+
+```
+输入：W [out_dim, in_dim]，rank r，scaling = α/r
+1. SVD: U, S, Vh = svd(W)
+2. 选取 r 个分量：
+   - PiSSA: 前 r 个（最大奇异值）
+   - MiLoRA: 后 r 个（最小奇异值）
+3. S_scaled = S_sel / scaling
+4. A = diag(√S_scaled) @ Vh_sel     # [r, in_dim]
+5. B = U_sel @ diag(√S_scaled)       # [out_dim, r]
+6. W -= scaling * B @ A              # 保证 W_new + scaling*BA = W_orig
+```
+
+### 实现
+
+**统一函数 `_init_svd_lora(lora_linear, mode)`**：PiSSA 用 `mode="max"`，MiLoRA 用 `mode="min"`。
+
+**TP 限制**：这两个方法修改 base weight（W -= delta），在 DTensor/TP 下 weight 是 shard 的，直接修改语义不正确。因此加了 TP guard：
+
+```python
+if peft_type in _BASE_WEIGHT_MODIFY_TYPES and lora_linear._tp_enabled:
+    raise ValueError(f"peft_type='{peft_type}' modifies base weights and is not compatible with TP.")
+```
+
+**使用**：yaml 里 `peft_type: pissa` 或 `peft_type: milora`，必须 TP=1。

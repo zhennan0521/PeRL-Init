@@ -80,10 +80,10 @@
     - 4node sync 实验已配置，待跑
 - [ ] Step 2: 移植 PEFT 方法到 AReaL
   - [ ] Step 2.1: 迁移各类 PEFT 方法（从 PeRL 借鉴）
-    - [ ] rsLoRA（改 scaling 一行）
-    - [ ] PiSSA（SVD 主成分初始化，改 base weight）
-    - [ ] MiLoRA（SVD 最小奇异值初始化，改 base weight）
-    - [ ] MiLoRA++（SVD 方向初始化 A，B=0，不改 base weight）
+    - [x] rsLoRA（改 scaling 一行）
+    - [x] PiSSA（SVD 主成分初始化，改 base weight）
+    - [x] MiLoRA（SVD 最小奇异值初始化，改 base weight）
+    - [x] MiLoRA++（SVD 方向初始化 A，B=0，不改 base weight）
     - [ ] DoRA（magnitude + direction 分解，改 forward）
     - [ ] SliceFine（切片 weight，自定义 layer）
     - [ ] LoRA+（A/B 不同学习率，改 optimizer）
