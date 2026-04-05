@@ -97,6 +97,20 @@ scheduling_spec:
 
 ---
 
+## 8. math_verify sympy 超时导致 rollout pipeline 崩溃
+
+**现象：** 大量 `RolloutController ERROR: Workflow execution failed ... AsyncTaskRunner is exiting, cannot wait for results`
+
+**原因：** reward 函数调用 `math_verify` 库解析模型输出时，sympy 处理某些复杂表达式会卡死（`mpf_pow_int` 中 `man*man` 无限计算），触发 `TimeoutException`。该异常未被 `AsyncTaskRunner` 优雅捕获，导致整个 runner 后台线程退出，连锁引发 consumer/producer thread 崩溃，最终所有 submit 调用失败。
+
+**影响：** 只杀死触发异常的那个 rollout worker（如 `rollout/3`），其他 worker 继续工作，训练不中断，但吞吐量下降。
+
+**状态：** AReaL 框架容错缺陷（单个 reward 计算失败不应杀死整个 runner），上游 `math_verify` 库已知问题。暂无修复，不影响训练结果。
+
+**出现于：** `lora_async_1.5b_tp1_fixed_review_202604011555.log`
+
+---
+
 ## 通用经验
 
 - 从旧版 AReaL 配置迁移时，逐个检查 deprecated 字段

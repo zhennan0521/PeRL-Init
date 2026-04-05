@@ -1,0 +1,184 @@
+experiment_name: lora-1.5b-dapo-sync-4node-lr5e-5
+trial_name: trial0
+
+seed: 1
+enable_offload: false
+total_train_epochs: 10
+tokenizer_path: ${actor.path}
+
+cluster:
+  n_nodes: 4
+  n_gpus_per_node: 8
+  fileroot: /jpfs-5p/shenzhennan/PeRL-Init/outputs
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${cluster.fileroot}/name_resolve
+
+rollout:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  max_concurrent_rollouts: 512
+  backend: sglang:d24
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 0
+  enable_rollout_tracing: true
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  dump_to_file: true
+
+gconfig:
+  n_samples: 8
+  min_new_tokens: 0
+  max_new_tokens: 16384
+  greedy: false
+  temperature: 1.0
+  lora_name: "lora"
+
+actor:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  backend: archon:d8
+  path: /jpfs/shenzhennan.1/models/DeepSeek-R1-Distill-Qwen-1.5B
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 32768
+  optimizer:
+    type: adam
+    lr: 5e-5
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.98
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.2
+  eps_clip_higher: 0.28
+  temperature: ${gconfig.temperature}
+  reward_scaling: 10.0
+  reward_bias: -0.5
+  kl_ctl: 0.0
+  ppo_n_minibatches: 4
+  recompute_logprob: false
+  use_decoupled_loss: false
+  reward_norm:
+    mean_level: group
+    std_level: group
+    group_size: ${gconfig.n_samples}
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  max_new_tokens: ${gconfig.max_new_tokens}
+  weight_update_mode: disk
+
+  # lora
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 32
+  lora_alpha: 32
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      mem: 32
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars:
+        PYTHONPATH: /jpfs-5p/shenzhennan/PeRL-Init/modules/AReaL
+
+ref:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  backend: ${actor.backend}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 32768
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+
+# SGLang
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: null
+  context_length: 32768
+  mem_fraction_static: 0.8
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  log_level: info
+
+# datasets
+train_dataset:
+  batch_size: 64
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  path: /jpfs/shenzhennan.1/datasets/dapo-math-17k
+  type: rl
+
+valid_dataset:
+  batch_size: 64
+  pin_memory: true
+  num_workers: 4
+  path: /jpfs/shenzhennan.1/datasets/aime-2024
+  type: rl
+
+# Utilities
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 32
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 32
+  freq_secs: null
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 32
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    name: "${experiment_name}_${trial_name}"
+    mode: "online"
+    wandb_api_key: "local-b0d90ad40bfaa2dd58fa4525f18c82ccb8aca2c6"
+    wandb_base_url: "http://11.71.1.218:8082"
+    entity: "automl"
+    project: "perl-init"
+
+perf_tracer:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  enabled: false
+  session_tracer:
+    enabled: false
