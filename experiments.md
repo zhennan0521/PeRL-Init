@@ -18,6 +18,7 @@
 | 3   | M1    | LoRA    | 32   | 5e-5 | 32    | async(2) | tp2dp4×1 | -     |      | baseline+debug | run_lora_async_1.5b_tp2.sh              | lora-1.5b-dapo-async-tp2-lr5e-5/202604011522               |
 | 4   | M1    | LoRA    | 32   | 5e-5 | 32    | async(2) | tp1dp8×1 | -     |      | baseline+debug | run_lora_async_1.5b_tp1_fixed_review.sh | lora-1.5b-dapo-async-lr5e-5-tp1-fixed-review/202604011555  |
 | 5   | M1    | LoRA    | 32   | 5e-5 | 32    | async(2) | tp1dp8×4 | -     |      | baseline+debug | run_lora_async_4node_1.5b.sh            | lora-1.5b-dapo-async-4node-lr5e-5-new-machine/202604021423 |
+| 6   | M1    | rsLoRA  | 32   | 5e-5 | 32    | async(2) | tp1dp8×4 | -     |      | Step 2.1       | run_rslora_async_4node_1.5b.sh          | rslora-1.5b-dapo-async-4node-lr5e-5/202604021511           |
 
 
 ## Conclusions

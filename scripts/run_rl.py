@@ -53,6 +53,7 @@ def main(args):
             workflow_kwargs=workflow_kwargs,
             eval_workflow="areal.workflow.rlvr.RLVRWorkflow",
             eval_workflow_kwargs=eval_workflow_kwargs,
+            dynamic_filter_fn=lambda x: 0 < x["rewards"].mean() < 1,
         )
 
 
