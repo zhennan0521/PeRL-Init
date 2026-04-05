@@ -38,5 +38,7 @@ Thumbs.db
 
 
 ray_start.sh
+fix_install.sh
+fix_install_inpod.sh
 
 *.log

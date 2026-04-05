@@ -587,3 +587,57 @@ if peft_type in _BASE_WEIGHT_MODIFY_TYPES and lora_linear._tp_enabled:
 ```
 
 **使用**：yaml 里 `peft_type: pissa` 或 `peft_type: milora`，必须 TP=1。
+
+## C.4 LoRA-FA 迁移方案
+
+### 背景
+
+LoRA-FA (LoRA with Frozen-A) 出自论文 *LoRA-FA: Memory-efficient Low-rank Adaptation for Large Language Models Fine-tuning*。核心思想：**冻结 A 矩阵（随机初始化后不再更新），只训练 B 矩阵**。这样可以节省约一半的 LoRA 梯度内存和优化器状态，同时性能接近标准 LoRA。
+
+### 算法
+
+1. A 用 kaiming 初始化（与标准 LoRA 相同），然后 **freeze**（`requires_grad = False`）
+2. B 初始化为 0（与标准 LoRA 相同）
+3. Forward 不变：`output = x @ W^T + scaling * x @ A^T @ B^T`
+4. Backward 只更新 B，A 不产生梯度
+
+### PeRL 实现
+
+PeRL 使用 HuggingFace PEFT 的 `create_lorafa_optimizer` [adapter.py:98]，它内部把 A 矩阵从优化器 param groups 中移除。
+
+### 迁移到 AReaL 的修改点
+
+AReaL 的 LoRA 权重是 plain tensor（不是 nn.Parameter），通过 `requires_grad_(True)` 来接收梯度。LoRA-FA 只需在初始化后把 A 的 `requires_grad` 设为 False。
+
+#### 1. `lora_linear.py` — 核心改动
+
+在 `from_linear()` 的 peft_type dispatch 中加入 `lorafa` 分支：
+
+```python
+if peft_type == "lorafa":
+    nn.init.kaiming_uniform_(lora_linear._lora_a_weight, a=math.sqrt(5))
+    nn.init.zeros_(lora_linear._lora_b_weight)
+    lora_linear._lora_a_weight.requires_grad_(False)  # freeze A
+```
+
+**影响分析：**
+
+- **`lora_parameters()`**：返回 `[_lora_a_weight, _lora_b_weight]`，不需要改。优化器会收到两个 tensor，但 A 的 `requires_grad=False`，优化器会自动跳过（Adam 对 grad=None 的参数不更新）。
+- **`sync_lora_grads()`**：遍历 A 和 B 的 grad，A.grad 为 None 时跳过（已有 `if tensor.grad is not None` 守卫 [lora_linear.py:398]），无需修改。
+- **`forward()`**：A 参与前向计算但不接收梯度，PyTorch autograd 自动处理，无需修改。
+- **`_save_to_state_dict` / `_load_from_state_dict`**：A 仍然需要保存和加载（checkpoint 恢复时需要相同的 A），无需修改。
+- **SGLang 推理端**：不受影响，adapter 格式不变。
+
+#### 2. `archon_engine.py` — 无需额外修改
+
+`peft_type` 已通过 `LoRAConfig` 传入 `from_linear()`，无需改动。
+
+#### 3. 新增启动脚本和 yaml
+
+- `scripts/lorafa_async_4node_1.5b_dapo.yaml`：基于 lora yaml，`peft_type: lorafa`
+- `scripts/run_lorafa_async_4node_1.5b.sh`：对应启动脚本
+
+### 注意事项
+
+1. LoRA-FA 与 rsLoRA 可以组合使用（rsLoRA 改 scaling，LoRA-FA 改训练参数），但目前先独立实现
+2. A frozen 后优化器状态（momentum/variance）不会为 A 分配，自动节省内存
