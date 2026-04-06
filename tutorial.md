@@ -690,3 +690,293 @@ LoRAConfig 加 `loraplus_lr_ratio` 字段。`_create_optimizer` 当 `peft_type =
 - checkpoint — 不变
 - `fsdp2_clip_grad_norm` — 用 `_get_all_parameters()` 的 flat list，和 optimizer groups 无关
 - `create_lr_scheduler` — 两个 group 共享同一 scheduler（constant），不影响
+
+## C.6 DoRA 迁移方案
+
+### 背景
+
+DoRA (Weight-Decomposed Low-Rank Adaptation) 出自论文 *DoRA: Weight-Decomposed Low-Rank Adaptation of Large Language Models* (Liu et al., 2024, NVIDIA)。核心思想：**将权重矩阵分解为 magnitude（幅度）和 direction（方向），对方向用 LoRA 更新，对幅度用独立可训练向量更新**。
+
+研究发现 full fine-tuning 中幅度和方向的更新是不对称的，而 LoRA 倾向于将两者耦合在一起。DoRA 通过解耦让微调更接近 full FT 效果。
+
+### 算法
+
+**权重分解：**
+
+预训练权重 $W_0 \in \mathbb{R}^{out \times in}$ 分解为：
+
+$$W_0 = m \cdot \frac{V}{\|V\|_c}$$
+
+其中 $m \in \mathbb{R}^{out}$ 是每行的 L2 范数（magnitude 向量），$V = W_0$（direction 矩阵），$\|\cdot\|_c$ 是按行计算的 L2 norm。
+
+**初始化：**
+
+$$m_0 = \|W_0\|_{\text{dim}=1} = [\|W_0[0,:]\|_2, \|W_0[1,:]\|_2, ..., \|W_0[\text{out}-1,:]\|_2]$$
+
+$m_0$ 是一个 shape 为 `[out_dim]` 的可训练向量。A、B 和标准 LoRA 相同（kaiming A, zeros B）。
+
+**Forward：**
+
+$$\text{weight\_norm} = \|W + \text{scaling} \cdot BA\|_{\text{dim}=1} \quad \text{(detach, 不参与反向传播)}$$
+
+$$\text{mag\_norm\_scale} = \frac{m'}{\text{weight\_norm}} \quad \text{(shape: [1, out\_dim])}$$
+
+$$\text{output} = (\text{mag\_norm\_scale} - 1) \cdot (x @ W^T) + \text{mag\_norm\_scale} \cdot \text{scaling} \cdot (x @ A^T @ B^T)$$
+
+关键技巧（论文 Section 4.3）：**weight_norm 要 detach**，不接收梯度。这保证梯度只通过 $m'$ 和 LoRA AB 流动。
+
+等价展开：$\text{output} = m' \cdot \frac{W + \text{scaling} \cdot BA}{\|W + \text{scaling} \cdot BA\|_c} \cdot x$
+
+### PeRL 实现
+
+PeRL 直接调用 HuggingFace PEFT 的 `LoraConfig(use_dora=True)` [adapter.py:21-32]，不需要手动实现。
+
+PEFT 的实现在 `peft/tuners/lora/dora.py:DoraLinearLayer`：
+- `update_layer()`：初始化 magnitude 向量 `self.weight = nn.Parameter(||W + scaling * BA||_dim1)`
+- `forward()`：计算 `mag_norm_scale = m / ||W + scaling * BA||_dim1.detach()`，输出 `(mag_norm_scale - 1) * base + mag_norm_scale * lora * scaling`
+
+### 迁移到 AReaL 的修改点
+
+DoRA 是之前所有 PEFT 方法中最复杂的——它不仅改初始化，还要**改 forward**。需要引入一个新的可训练参数 `_dora_magnitude`。
+
+#### 1. `lora_linear.py` — 核心改动（初始化 + forward）
+
+**1a. 初始化：在 `from_linear()` 加 `dora` 分支**
+
+```python
+elif peft_type == "dora":
+    nn.init.kaiming_uniform_(lora_linear._lora_a_weight, a=math.sqrt(5))
+    nn.init.zeros_(lora_linear._lora_b_weight)
+    # magnitude 向量 = 每行 L2 norm of W（初始时 BA=0，所以 ||W + 0|| = ||W||）
+    local_w = getattr(lora_linear.weight, "_local_tensor", lora_linear.weight)
+    mag = torch.linalg.norm(local_w.detach().float(), dim=1).to(local_w.dtype)
+    mag.requires_grad_(True)
+    object.__setattr__(lora_linear, "_dora_magnitude", mag)
+```
+
+和 A/B 一样用 `object.__setattr__` 存为 plain tensor，对 FSDP2 不可见。
+
+**1b. Forward：新增 DoRA 分支**
+
+修改 `forward()` 方法，在标准 LoRA forward 基础上加 DoRA 逻辑：
+
+```python
+def forward(self, x: torch.Tensor) -> torch.Tensor:
+    if self.disabled:
+        return F.linear(x, self.weight, self.bias)
+
+    if self._tp_enabled:
+        # DoRA + TP: 见下方 TP 兼容性讨论
+        return self._tp_lora_forward(x, F.linear(x, self.weight, self.bias))
+
+    if hasattr(self, "_dora_magnitude"):
+        return self._dora_forward(x)
+
+    # 标准 LoRA forward（不变）
+    base_out = F.linear(x, self.weight, self.bias)
+    h = F.dropout(x, p=self._dropout_p, training=self.training)
+    h = F.linear(h, self._lora_a_weight)
+    lora_out = F.linear(h, self._lora_b_weight)
+    return base_out + self.scaling * lora_out
+
+def _dora_forward(self, x: torch.Tensor) -> torch.Tensor:
+    """DoRA forward: magnitude × normalized(direction + lora_delta)."""
+    # base output (without bias — bias added at the end)
+    base_out = F.linear(x, self.weight)
+
+    # lora output
+    h = F.dropout(x, p=self._dropout_p, training=self.training)
+    h = F.linear(h, self._lora_a_weight)
+    lora_out = F.linear(h, self._lora_b_weight)
+
+    # compute weight norm: ||W + scaling * B @ A||_dim1, detached
+    lora_weight = self._lora_b_weight @ self._lora_a_weight
+    weight_norm = torch.linalg.norm(
+        self.weight.detach() + self.scaling * lora_weight.detach(),
+        dim=1
+    ).to(x.dtype)  # [out_dim]
+
+    # mag_norm_scale = m / ||W + scaling*BA||, shape [1, out_dim]
+    mag_norm_scale = (self._dora_magnitude / weight_norm).view(1, -1)
+
+    # DoRA output = (scale - 1) * base + scale * scaling * lora
+    result = (mag_norm_scale - 1) * base_out + mag_norm_scale * self.scaling * lora_out
+
+    # add bias
+    if self.bias is not None:
+        result = result + self.bias
+
+    return result
+```
+
+**关键设计要点：**
+- `weight_norm` 要 `.detach()`：不让梯度流过 norm 分支（论文 Section 4.3）
+- `base_out` 不含 bias：因为 DoRA 对 `W*x` 做缩放，bias 不参与方向分解，单独加
+- `lora_weight = B @ A` 每次 forward 都要算：因为 BA 在训练中不断变化
+
+**1c. `lora_parameters()` 返回 magnitude**
+
+```python
+def lora_parameters(self) -> list[torch.Tensor]:
+    params = [self._lora_a_weight, self._lora_b_weight]
+    if hasattr(self, "_dora_magnitude"):
+        params.append(self._dora_magnitude)
+    return params
+```
+
+**1d. `_save_to_state_dict` / `_load_from_state_dict` 加 magnitude**
+
+```python
+# _save_to_state_dict 中追加：
+if hasattr(self, "_dora_magnitude"):
+    m = self._dora_magnitude if keep_vars else self._dora_magnitude.detach()
+    destination[prefix + "_dora_magnitude"] = m
+
+# _load_from_state_dict 中追加：
+m_key = prefix + "_dora_magnitude"
+if m_key in state_dict:
+    self._dora_magnitude.data.copy_(state_dict.pop(m_key))
+```
+
+**1e. `adapter_params()` 追加 magnitude**
+
+```python
+def adapter_params(self) -> list[str]:
+    names = ["_lora_a_weight", "_lora_b_weight"]
+    if hasattr(self, "_dora_magnitude"):
+        names.append("_dora_magnitude")
+    return names
+```
+
+**1f. `sync_lora_grads()` — 无需修改**
+
+`sync_lora_grads` 目前只遍历 `_lora_a_weight` 和 `_lora_b_weight`。需要让它**也同步 `_dora_magnitude` 的梯度**：
+
+```python
+for module in model.modules():
+    if isinstance(module, LoRALinear):
+        tensors_to_sync = [
+            ("a", module._lora_a_weight),
+            ("b", module._lora_b_weight),
+        ]
+        if hasattr(module, "_dora_magnitude"):
+            tensors_to_sync.append(("m", module._dora_magnitude))
+        for _pname, tensor in tensors_to_sync:
+            if tensor.grad is not None:
+                ...  # all_reduce
+```
+
+#### 2. `archon_engine.py` — 无需额外修改
+
+`peft_type` 已通过 `LoRAConfig` 传入 `from_linear()`。`_get_all_parameters()` 调用 `lora_parameters()` 获取可训练参数，magnitude 自动包含在内。
+
+#### 3. DoRA + TP 兼容性
+
+**问题：** DoRA forward 需要访问完整的 `self.weight` 来算 `||W + scaling * BA||_dim1`。但 TP 后 weight 是 DTensor（只有本地 shard）。
+
+**分析：**
+- colwise TP（q_proj, k_proj, v_proj, gate_proj, up_proj）：weight 按 dim=0（行）切分，每个 rank 有一部分行。`dim=1 norm` 在每行内独立，**每个 rank 可以独立计算自己的行的 norm**。magnitude 也只存对应行。✅ 兼容。
+- rowwise TP（o_proj, down_proj）：weight 按 dim=1（列）切分。`dim=1 norm` 需要跨列求和，**需要 all-reduce**。❌ 需要额外通信。
+
+**方案：先限制 DoRA 只在 TP=1 时使用**（和 PiSSA、MiLoRA 类似），在 `from_linear()` 加守卫：
+
+```python
+if peft_type == "dora" and lora_linear._tp_enabled:
+    raise ValueError(
+        "peft_type='dora' is not compatible with TP. "
+        "Use TP=1 or choose a different method."
+    )
+```
+
+如果后续需要 TP 支持，可以针对 colwise 单独实现，rowwise 加 all-reduce。
+
+#### 4. DoRA + LoRA-FA / LoRA+ 兼容性
+
+- **DoRA + LoRA-FA**：理论上可以（冻结 A，只训 B 和 magnitude），但初始版本不组合。
+- **DoRA + LoRA+**：理论上可以（B 用更大 lr，magnitude 用 base_lr），初始版本不组合。
+- **DoRA + rsLoRA**：可以组合（rsLoRA 只改 scaling 公式），但初始版本不组合。
+
+#### 5. 性能影响
+
+DoRA forward 多了一个 `B @ A`（shape `[out, in]`）和一个 norm 计算。对于典型的 hidden=1536, rank=32：
+- `B @ A`: `[1536, 32] @ [32, 1536]` = `[1536, 1536]` — 约 7.1M FLOPs
+- `norm(dim=1)`: `[1536, 1536]` 按行求和 — 忽略不计
+
+相比 base `F.linear` 的计算量（`[batch×seq, 1536] @ [1536, 1536]`），DoRA 额外开销很小（不依赖 batch size）。
+
+#### 6. 新增启动脚本和 yaml
+
+- `scripts/dora_async_4node_1.5b_dapo.yaml`：基于 lora yaml，`peft_type: dora`
+- `scripts/run_dora_async_4node_1.5b.sh`：对应启动脚本
+
+### 注意事项
+
+1. **`B @ A` 每次 forward 都要算**：不能缓存，因为训练中 A、B 一直在变。推理可以缓存（但 SGLang 端用的是自己的 adapter 实现，不受影响）
+2. **weight_norm 必须 detach**：这是 DoRA 论文的关键设计。如果不 detach，梯度会通过 norm 分支影响 W（base weight 应该是 frozen 的），而且 W 是 DTensor 时会引发 FSDP2 问题
+3. **magnitude 向量不大**：每个 LoRALinear 只多 `out_dim` 个标量（如 1536），总共 7 层 × 1536 ≈ 10K 参数，negligible
+
+## C.7 MiLoRA++ 研究方向思考
+
+### 现状
+
+MiLoRA++（PeRL 提出）用 SVD 最小奇异值方向初始化 A，B=0，假设 RL 更新方向与预训练权重的"被遗忘子空间"相关。但实验中 MiLoRA++ 并没有比 vanilla LoRA 表现出显著优势。
+
+### 为什么 MiLoRA++ 可能效果有限
+
+1. **B=0 意味着初始方向仅在训练开始后间接起作用**。A 的方向选择影响的是梯度流的"起点"，但 optimizer 几步之后会自己找到方向
+2. **最小奇异值方向 ≠ RL 需要的方向**。这只是预训练权重的统计性质，和 reward signal 无直接关联
+3. **RL 更新方向可能本身并不特殊** — 如果 RL 和 SFT 的更新方向在谱空间上没有显著差异，那任何基于方向的 init 都不会有大突破
+
+### 可探索的研究方向
+
+#### 方向 1: RL 更新方向实证分析（最优先）
+
+**核心问题**：RL 的 ΔW 到底落在原始 W 的哪些奇异值方向上？
+
+**实验方案**：
+1. 跑 vanilla LoRA RL 训练到收敛，每 N 步保存 lora_A 和 lora_B
+2. 计算 ΔW = scaling × B @ A（各时间步）
+3. 将 ΔW 投影到原始 W 的 SVD 基上：`coefficients = U^T @ ΔW @ Vh^T`
+4. 画出 coefficients 在不同奇异值方向上的分布
+5. 对比：top-r 方向 vs bottom-r 方向 vs random-r 方向，哪个解释了更多 ΔW
+
+**结果解读**：
+- 集中在 top 方向 → PiSSA 更合理
+- 集中在 bottom 方向 → MiLoRA++ 思路对但实现可能有问题
+- 比较均匀 → init 方向不是关键因素，应转向训练动态
+- 有独特 pattern → 新方法的起点
+
+#### 方向 2: Gradient-informed initialization（梯度引导初始化）
+
+不用预训练权重的 SVD，而是用 RL 梯度的信息：
+- 跑几步 RL，收集 ∇W（梯度矩阵）
+- 对梯度矩阵做 SVD，找到 RL 梯度的主方向
+- 用这些方向初始化 A
+
+比 MiLoRA++ 更直接 — 不是猜测 RL 会往哪走，而是直接观测。代价是需要一个 warm-up phase。
+
+#### 方向 3: 逐层差异化策略（Layer-wise adaptive）
+
+不同层在 RL 中的角色不同：
+- 底层（embedding 附近）：语义理解，可能不需要太多改动
+- 顶层（output 附近）：决策层，RL reward 驱动的更新集中在这里
+
+可以做：不同层用不同 rank、不同 init、不同 scaling。先跑实验看各层 ΔW 范数分布。
+
+#### 方向 4: RL-specific 训练动态
+
+如果 init 方向不是关键，那可能训练动态才是：
+- RL 前期探索阶段用大 scaling/lr，后期收敛阶段缩小
+- 用 reward signal 的方差自适应调整 LoRA scaling
+- Reward-aware gradient clipping
+
+#### 方向 5: 组合方法 ablation
+
+MiLoRA++ 方向 + rsLoRA scaling + LoRA+ 差异化 lr，是否有协同效应？低成本 ablation。
+
+### 建议执行顺序
+
+1. **方向 1**（实证分析）— 不需要改代码，只需 post-hoc 分析脚本。结果决定后续方向
+2. **方向 5**（组合方法）— 已有实现，只需配 yaml 跑实验
+3. **方向 3**（逐层分析）— 可以复用方向 1 的分析框架
+4. **方向 2/4** — 需要更多代码开发，视前面结果决定

@@ -84,7 +84,7 @@
     - [x] PiSSA（SVD 主成分初始化，改 base weight）
     - [x] MiLoRA（SVD 最小奇异值初始化，改 base weight）
     - [x] MiLoRA++（SVD 方向初始化 A，B=0，不改 base weight）
-    - [ ] DoRA（magnitude + direction 分解，改 forward）
+    - [x] DoRA（magnitude + direction 分解，改 forward）
     - [ ] SliceFine（切片 weight，自定义 layer）
     - [ ] LoRA+（A/B 不同学习率，改 optimizer）
     - [x] LoRA-FA（冻结 A 只训 B，改 optimizer）
