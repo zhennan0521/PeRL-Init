@@ -588,6 +588,40 @@ if peft_type in _BASE_WEIGHT_MODIFY_TYPES and lora_linear._tp_enabled:
 
 **使用**：yaml 里 `peft_type: pissa` 或 `peft_type: milora`，必须 TP=1。
 
+### Async Rollout 兼容性问题与修复
+
+**问题**：PiSSA/MiLoRA 在 `_freeze_non_lora_params` 中修改了 actor 端的 base weight（`W -= scaling * BA`），但 SGLang rollout 加载的是**原始 HF 模型**。SGLang 的 forward 变成 `W_orig @ x + scaling * BA @ x`，而不是正确的 `W_modified @ x + scaling * BA @ x`，导致 SVD 分量被 double 加上，输出完全是乱码。
+
+此问题仅影响 `_BASE_WEIGHT_MODIFY_TYPES`（`pissa`, `milora`）。MiLoRA++（B=0，不改 base weight）和标准 LoRA 不受影响。
+
+**修复方案**：在 PiSSA/MiLoRA 修改 base weight 后，保存修改后的 base model 到磁盘，让 SGLang 加载这个修改后的模型。
+
+**修改点：**
+
+#### 1. `archon_engine.py` — `_freeze_non_lora_params` 保存修改后的 base model
+
+```python
+# 在 _freeze_non_lora_params 末尾，如果 peft_type 是 pissa/milora:
+if self.lora_config.peft_type in ("pissa", "milora"):
+    path = self._save_pissa_base_model()
+    self._pissa_base_model_path = path
+```
+
+`_save_pissa_base_model()` 用已有的 `save_model_to_hf()` 保存完整模型（只 rank 0 写磁盘）。保存路径：`{fileroot}/checkpoints/{exp}/{trial}/actor/pissa_base_model/`。
+
+#### 2. `rl_trainer.py` — `_save_initial_lora_weights` 返回 base model path
+
+```python
+# 如果 actor engine 有 _pissa_base_model_path，传给 _init_rollout
+# _init_rollout 用它替换 sglang.model_path
+```
+
+#### 3. SGLang 端 — 无需改动
+
+SGLang 的 `model_path` 指向修改后的模型即可。LoRA adapter update 流程不变（只更新 A/B weights，base model 不变）。
+
+**注意**：保存完整 base model 会有一次性的 I/O 开销（1.5B ≈ 3GB，7B ≈ 14GB），但只在初始化时发生一次。
+
 ## C.4 LoRA-FA 迁移方案
 
 ### 背景

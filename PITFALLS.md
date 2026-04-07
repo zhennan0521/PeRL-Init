@@ -111,6 +111,36 @@ scheduling_spec:
 
 ---
 
+## 9. PiSSA / MiLoRA 的 SVD 初始化在 meta device 流程下失效
+
+**现象：** PiSSA 和 MiLoRA 实验跑出来的结果可能和标准 LoRA 无区别。
+
+**原因：** 两个问题叠加，导致 SVD 初始化完全无效：
+
+1. **Meta device 上 SVD 无意义**：`from_linear()` 在 meta device 上调用（`Model structure created on meta device`），此时 weight 没有真实数据。`_init_svd_lora` 对 meta tensor 做 SVD → 结果是垃圾值。`w.data -= scaling * BA` 也在 meta 上执行，无效。
+
+2. **`_freeze_non_lora_params` re-init 覆盖**：权重加载到真实设备后，`_freeze_non_lora_params` 里的 re-init 逻辑（`archon_engine.py:1099-1106`）对所有 adapter 统一执行 `kaiming(A) + zeros(B)`，把 SVD 设置的 A/B 值全部覆盖掉。
+
+**结果：**
+- A 被重置为 kaiming 随机值（不是 SVD 分量）
+- B 被重置为 zeros（不是 SVD 分量）
+- base weight 没有被减去 `scaling * BA`（meta 上的减法无效，加载时直接覆盖为 HF checkpoint 权重）
+- PiSSA/MiLoRA 退化为标准 LoRA
+
+**修复方向：** 需要在 `_freeze_non_lora_params` 里对 PiSSA/MiLoRA 跳过 re-init，并在权重加载到真实设备后重新执行 SVD 初始化（类似 DoRA 的 lazy init 方案）。
+
+**修复：** 在 `lora_linear.py` 新增 `_reinit_for_peft_type()` 调度函数和 `_reinit_svd_lora()` / `_reinit_milora_plus()` 实现。在 `_freeze_non_lora_params` 中，用 `_reinit_for_peft_type(module)` 替代原来的 blanket `kaiming(A) + zeros(B)`，根据 `module._peft_type` 分发：
+- **pissa/milora**: 调用 `_reinit_svd_lora()`，使用 `DTensor.full_tensor()` all-gather 真实权重，做 SVD，设置 A/B，并修改 base weight 的 local shard（`local_w.data -= delta[start:start+shard_size, :]`）
+- **milora_plus**: 调用 `_reinit_milora_plus()`，all-gather 权重做 SVD，设置 A = 最小奇异值方向，B = 0
+- **lorafa**: kaiming A + zeros B + `requires_grad_(False)` 冻结 A
+- **lora/rslora/dora/lora_plus**: 原始 kaiming A + zeros B
+
+**状态：** 已修复。
+
+**引入时间：** PiSSA/MiLoRA 实现时（commit `d118332d`），未考虑到 AReaL 的 meta device → materialize → re-init 三阶段流程。
+
+---
+
 ## 通用经验
 
 - 从旧版 AReaL 配置迁移时，逐个检查 deprecated 字段
